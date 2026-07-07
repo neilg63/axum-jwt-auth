@@ -55,15 +55,21 @@
 //!
 //! This Mod does **not** load `.env` files.
 //!
-//! | Variable              | Required | Default                 | Notes                                     |
-//! |-----------------------|----------|-------------------------|-------------------------------------------|
-//! | `JWT_SECRET`          | **yes**  | —                       |                                           |
-//! | `BASE_URL`            | no       | `http://localhost:8000` |                                           |
-//! | `AUTH_PATH`           | no       | `/api/login`            |                                           |
-//! | `JWT_TTL_DAYS`        | no       | `14`                    | Token lifetime in days                    |
-//! | `USER_MODEL_PATH`     | no       | *(unset — no prv)*      | Sets `prv` claim and **enables** its check|
-//! | `JWT_VALIDATE_ISSUER` | no       | `false`                 | `true` or `1` to enable                  |
-//! | `JWT_AUDIENCE`        | no       | *(unset)*               | Comma-separated audience URIs             |
+//! | Variable               | Required | Default                 | Notes                                     |
+//! |------------------------|----------|-------------------------|-------------------------------------------|
+//! | `JWT_SECRET`           | one of   | —                       | HS256 shared secret                       |
+//! | `JWT_KEY_NAME`         | these    | —                       | EdDSA: SSH-convention key name — `~/.ssh/{name}` / `~/.ssh/{name}.pub` |
+//! | `JWT_KEY_PATH`         | three    | —                       | EdDSA: exact PEM file path, used as-is    |
+//! | `BASE_URL`             | no       | `http://localhost:8000` |                                           |
+//! | `AUTH_PATH`            | no       | `/api/login`            |                                           |
+//! | `JWT_TTL_DAYS`         | no       | `14`                    | Token lifetime in days                    |
+//! | `USER_MODEL_PATH`      | no       | *(unset — no prv)*      | Sets `prv` claim and **enables** its check|
+//! | `JWT_VALIDATE_ISSUER`  | no       | `false`                 | `true` or `1` to enable                  |
+//! | `JWT_AUDIENCE`         | no       | *(unset)*               | Comma-separated audience URIs             |
+//!
+//! For `JWT_KEY_NAME` / `JWT_KEY_PATH`, the PEM itself isn't read here —
+//! it's read from disk lazily, at sign/verify time. See
+//! [`AuthType::PubPriKey`] / [`AuthType::PubPriPath`] for details.
 //!
 //! ## Laravel migration
 //!
@@ -91,7 +97,7 @@ pub mod middleware;
 pub mod token;
 
 pub use claims::{Claims, NoExtraClaims};
-pub use config::{JwtConfig, MultiJwtConfig, ProviderStrategy};
+pub use config::{AuthType, JwtConfig, MultiJwtConfig, ProviderStrategy};
 pub use error::AuthError;
 pub use middleware::{AuthUser, OptionalAuthUser};
 pub use token::{

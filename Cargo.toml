@@ -2,9 +2,13 @@
 name = "axum-jwt-bridge"
 version = "0.1.0"
 edition = "2024"
-description = "JWT encode/decode for Axum, compatible compatible with any HS256 JWT issuer with an audience claim  as well as Laravel's `tymon/jwt-auth` with a provider claim"
+description = "JWT encode/decode for Axum: HS256 shared-secret or EdDSA (Ed25519) public/private key auth, with optional Laravel interop and multi-issuer support"
 license = "MIT"
+repository = "https://github.com/neilg63/axum-jwt-bridge"
+documentation = "https://docs.rs/axum-jwt-bridge"
+readme = "README.md"
 keywords = ["axum", "jwt", "authentication", "laravel"]
+categories = ["web-programming", "authentication"]
 
 [dependencies]
 jsonwebtoken = { version = "^10.3", features = ["rust_crypto"] }

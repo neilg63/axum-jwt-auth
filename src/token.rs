@@ -1,4 +1,4 @@
-use jsonwebtoken::{Algorithm, DecodingKey, EncodingKey, Header, Validation, decode, encode, get_current_timestamp};
+use jsonwebtoken::{Header, Validation, decode, encode, get_current_timestamp};
 use rand::RngExt;
 use serde::{de::DeserializeOwned, Serialize};
 
@@ -48,16 +48,17 @@ pub fn generate_jwt_with<E: Serialize>(
     if sub.is_empty() {
         return Err(AuthError::InvalidSubject("user_id must not be empty".into()));
     }
-    if config.secret.is_empty() {
-        return Err(AuthError::ConfigError("JWT secret must not be empty".into()));
+    if config.key.is_empty() {
+        return Err(AuthError::ConfigError("JWT key must not be empty".into()));
     }
 
     let now = get_current_timestamp() as i64;
+    let ttl_secs = config.ttl_seconds.unwrap_or((config.ttl_days as i64) * 86_400);
 
     let claims = Claims {
         iss: Some(config.issuer()),
         iat: now,
-        exp: now + (config.ttl_days as i64) * 86_400,
+        exp: now + ttl_secs,
         nbf: now,
         jti: generate_jti(16),
         sub,
@@ -67,9 +68,9 @@ pub fn generate_jwt_with<E: Serialize>(
     };
 
     encode(
-        &Header::new(Algorithm::HS256),
+        &Header::new(config.key.algorithm()),
         &claims,
-        &EncodingKey::from_secret(config.secret.as_bytes()),
+        &config.key.encoding_key()?,
     )
     .map_err(|e| AuthError::InvalidToken(e.to_string()))
 }
@@ -128,7 +129,7 @@ pub fn verify_jwt_as<E: DeserializeOwned>(
     token: &str,
     config: &JwtConfig,
 ) -> Result<Claims<E>, AuthError> {
-    let mut validation = Validation::new(Algorithm::HS256);
+    let mut validation = Validation::new(config.key.algorithm());
     validation.validate_exp = true;
     validation.validate_nbf = true;
     validation.set_required_spec_claims(&["exp", "sub", "iat"]);
@@ -145,7 +146,7 @@ pub fn verify_jwt_as<E: DeserializeOwned>(
 
     let data = decode::<Claims<E>>(
         token,
-        &DecodingKey::from_secret(config.secret.as_bytes()),
+        &config.key.decoding_key()?,
         &validation,
     )
     .map_err(|e| match e.kind() {
@@ -339,6 +340,106 @@ mod tests {
         let other = JwtConfig::new("unknown-secret");
         let token = generate_jwt(3, &other).unwrap();
         assert!(verify_jwt_any(&token, &multi).is_err());
+    }
+
+    // ── EdDSA (Ed25519 pub/priv) tests ─────────────────────────────────────────
+    //
+    // Keys generated with:
+    //   openssl genpkey -algorithm Ed25519 -out private.pem
+    //   openssl pkey -in private.pem -pubout -out public.pem
+
+    const ED25519_PRIVATE_PEM: &str = "-----BEGIN PRIVATE KEY-----\n\
+MC4CAQAwBQYDK2VwBCIEIFhV9IQhWlsUUaXNJRIpFs2t1UrxFZ5+jqZj6OQaP/bP\n\
+-----END PRIVATE KEY-----\n";
+
+    const ED25519_PUBLIC_PEM: &str = "-----BEGIN PUBLIC KEY-----\n\
+MCowBQYDK2VwAyEAzTkaQZpuuiMyLeAbAzwQZsevd074P9w1dc28P0Jm0ds=\n\
+-----END PUBLIC KEY-----\n";
+
+    /// `PubPriKey` follows the SSH key-file convention: `~/.ssh/{name}`
+    /// (private) / `~/.ssh/{name}.pub` (public). HOME is process-global,
+    /// so every scenario that needs a mocked `~/.ssh` runs inside this one
+    /// test rather than racing across parallel tests — and a real HOME is
+    /// restored, and the temp dir removed, before returning.
+    #[test]
+    fn eddsa_ssh_key_name_roundtrip_and_rejections() {
+        let home_dir = std::env::temp_dir().join(format!("axum-jwt-bridge-test-home-{}", generate_jti(8)));
+        let ssh_dir = home_dir.join(".ssh");
+        std::fs::create_dir_all(&ssh_dir).unwrap();
+        std::fs::write(ssh_dir.join("id_ed25519"), ED25519_PRIVATE_PEM).unwrap();
+        std::fs::write(ssh_dir.join("id_ed25519.pub"), ED25519_PUBLIC_PEM).unwrap();
+        std::fs::write(
+            ssh_dir.join("other_key.pub"),
+            "-----BEGIN PUBLIC KEY-----\n\
+MCowBQYDK2VwAyEA1y1CmbeUGoMfPNH9UBr8OG199ieLVVx/dT9uurMQclU=\n\
+-----END PUBLIC KEY-----\n",
+        )
+        .unwrap();
+
+        let original_home = std::env::var("HOME").ok();
+        unsafe {
+            std::env::set_var("HOME", &home_dir);
+        }
+
+        // Roundtrip: Server A signs with ~/.ssh/id_ed25519, Server B
+        // verifies with ~/.ssh/id_ed25519.pub — same name, different file.
+        let signing_cfg = JwtConfig::new_with_key_name("id_ed25519");
+        let token = generate_jwt(42u32, &signing_cfg).unwrap();
+        let verifying_cfg = JwtConfig::new_with_key_name("id_ed25519");
+        let claims = verify_jwt(&token, &verifying_cfg).unwrap();
+        assert_eq!(claims.sub, "42");
+
+        // A different keypair's public key must not validate this token.
+        let wrong_cfg = JwtConfig::new_with_key_name("other_key");
+        assert!(verify_jwt(&token, &wrong_cfg).is_err());
+
+        // A missing private key file fails to sign, not silently produce
+        // a bad token.
+        let missing_cfg = JwtConfig::new_with_key_name("no_such_key");
+        assert!(generate_jwt(1, &missing_cfg).is_err());
+
+        unsafe {
+            match &original_home {
+                Some(v) => std::env::set_var("HOME", v),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+        let _ = std::fs::remove_dir_all(&home_dir);
+    }
+
+    /// `PubPriPath` uses the given path exactly as-is, with no suffix
+    /// convention — each side points directly at the file it holds.
+    #[test]
+    fn eddsa_exact_path_roundtrip() {
+        let dir = std::env::temp_dir();
+        let priv_path = dir.join(format!("axum-jwt-bridge-test-{}-private.pem", generate_jti(8)));
+        let pub_path = dir.join(format!("axum-jwt-bridge-test-{}-public.pem", generate_jti(8)));
+        std::fs::write(&priv_path, ED25519_PRIVATE_PEM).unwrap();
+        std::fs::write(&pub_path, ED25519_PUBLIC_PEM).unwrap();
+
+        let signing_cfg = JwtConfig::new_with_key_path(priv_path.to_str().unwrap());
+        let token = generate_jwt(99u32, &signing_cfg).unwrap();
+
+        let verifying_cfg = JwtConfig::new_with_key_path(pub_path.to_str().unwrap());
+        let claims = verify_jwt(&token, &verifying_cfg).unwrap();
+        assert_eq!(claims.sub, "99");
+
+        let _ = std::fs::remove_file(&priv_path);
+        let _ = std::fs::remove_file(&pub_path);
+    }
+
+    #[test]
+    fn eddsa_exact_path_public_key_cannot_sign() {
+        let dir = std::env::temp_dir();
+        let pub_path = dir.join(format!("axum-jwt-bridge-test-{}-public-only.pem", generate_jti(8)));
+        std::fs::write(&pub_path, ED25519_PUBLIC_PEM).unwrap();
+
+        // A public key PEM isn't a valid PKCS8 private key — signing must
+        // fail rather than silently produce a bad token.
+        let cfg = JwtConfig::new_with_key_path(pub_path.to_str().unwrap());
+        assert!(generate_jwt(1, &cfg).is_err());
+
+        let _ = std::fs::remove_file(&pub_path);
     }
 
     #[test]

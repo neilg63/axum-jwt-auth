@@ -4,15 +4,13 @@
 
 # axum-jwt-bridge
 
-JWT encode/decode for [Axum](https://docs.rs/axum) microservices, compatible with any HS256 JWT issuer with an audience claim (`aud`) as well as Laravel's `tymon/jwt-auth` with a provider claim (`prv`). Supports accepting tokens from multiple issuers simultaneously.
+JWT encode/decode for [Axum](https://docs.rs/axum) microservices. Sign and verify with either an HS256 shared secret or an EdDSA (Ed25519) public/private keypair, with an audience claim (`aud`) for any standard issuer and a provider claim (`prv`) for Laravel's `tymon/jwt-auth`. Supports accepting tokens from multiple issuers simultaneously.
 
 ## Differences from `axum-jwt-auth`
 
 - `axum-jwt-bridge` is focused on interoperability and migration scenarios (notably Laravel `prv` compatibility and multi-issuer acceptance during transitions).
 - This crate can generate JWTs with standard registered claims (`iss`, `iat`, `exp`, `nbf`, `jti`, `sub`) plus optional `aud`/`prv`, while still prioritizing simple decode/extract middleware usage.
 - [`axum-jwt-auth`](https://crates.io/crates/axum-jwt-auth) also supports standard-claims workflows and includes additional features that may be useful depending on your auth model; review both crates for your project needs.
-
-
 
 Extracts `user_id: u32` from the `sub` claim. Role-based authorization is the consuming application's responsibility.
 
@@ -64,13 +62,19 @@ This crate does **not** load `.env` files.
 
 | Variable              | Required | Default                  | Notes                                      |
 |-----------------------|----------|--------------------------|--------------------------------------------|
-| `JWT_SECRET`          | **yes**  | —                        |                                            |
+| `JWT_SECRET`          | one of   | —                        | HS256 shared secret                        |
+| `JWT_KEY_NAME`        | these    | —                        | EdDSA: SSH-convention key name — `~/.ssh/{name}` / `~/.ssh/{name}.pub` |
+| `JWT_KEY_PATH`        | three    | —                        | EdDSA: exact PEM file path, used as-is     |
 | `BASE_URL`            | no       | `http://localhost:8000`  |                                            |
 | `AUTH_PATH`           | no       | `/api/login`             |                                            |
 | `JWT_TTL_DAYS`        | no       | `14`                     | Token lifetime in days                     |
 | `USER_MODEL_PATH`     | no       | *(unset)*                | Sets `prv` and enables its validation      |
 | `JWT_VALIDATE_ISSUER` | no       | `false`                  | Set to `true` or `1` to enable             |
 | `JWT_AUDIENCE`        | no       | *(unset)*                | Comma-separated; sets and validates `aud`  |
+
+Exactly one of `JWT_SECRET`, `JWT_KEY_NAME`, or `JWT_KEY_PATH` must be
+set. For the latter two, the PEM isn't read at `from_env()` time — it's
+read from disk lazily, at sign/verify time. See below.
 
 ## Programmatic configuration
 
@@ -97,6 +101,62 @@ let config = JwtConfig::new("my-secret")
     .auth_path("/v2/token");
 ```
 
+## EdDSA (Ed25519 public/private key) configuration
+
+For cross-service setups where the verifying service should never see the
+signing secret, use an Ed25519 keypair instead of a shared HS256 secret.
+Neither constructor below takes the PEM directly — the PEM is read from
+disk lazily, the first time a token is actually signed or verified.
+
+```sh
+# Server A (issuer): generate a private key
+openssl genpkey -algorithm Ed25519 -out private.pem
+
+# Extract the public key to give to Server B (verifier)
+openssl pkey -in private.pem -pubout -out public.pem
+```
+
+**By SSH-convention name** (`JwtConfig::new_with_key_name` / `JWT_KEY_NAME`)
+— resolves to `~/.ssh/{name}` (private) and `~/.ssh/{name}.pub` (public).
+Both sides use the same name; each side only ever has the one file it needs:
+
+```sh
+# Server A (issuer) has ~/.ssh/app_key (private key, no .pub file needed)
+# Server B (verifier) has ~/.ssh/app_key.pub (public key, no private file needed)
+```
+
+```rust,no_run
+use axum_jwt_bridge::JwtConfig;
+
+// Server A signs — reads ~/.ssh/app_key.
+let signing_config = JwtConfig::new_with_key_name("app_key");
+let token = axum_jwt_bridge::generate_jwt(1264, &signing_config).unwrap();
+
+// Server B verifies with the same name — reads ~/.ssh/app_key.pub.
+let verifying_config = JwtConfig::new_with_key_name("app_key");
+let claims = axum_jwt_bridge::verify_jwt(&token, &verifying_config).unwrap();
+```
+
+**By exact path** (`JwtConfig::new_with_key_path` / `JWT_KEY_PATH`) — the
+path is used as-is, with no `.pub` suffix convention. Point each service
+directly at the file it holds:
+
+```rust,no_run
+use axum_jwt_bridge::JwtConfig;
+
+// Server A signs — reads exactly this path.
+let signing_config = JwtConfig::new_with_key_path("/etc/keys/private.pem");
+let token = axum_jwt_bridge::generate_jwt(1264, &signing_config).unwrap();
+
+// Server B verifies — reads exactly this (different) path.
+let verifying_config = JwtConfig::new_with_key_path("/etc/keys/public.pem");
+let claims = axum_jwt_bridge::verify_jwt(&token, &verifying_config).unwrap();
+```
+
+Either way, a `JwtConfig` resolving only a public key can verify tokens
+but cannot sign them — `generate_jwt`/`generate_jwt_with` return
+`AuthError::ConfigError` if the private key file can't be read.
+
 ## Token generation
 
 ```rust
@@ -109,9 +169,10 @@ let token = generate_jwt(1264, &config).unwrap();
 ## Token verification
 
 ```rust
-use axum_jwt_bridge::{verify_jwt, JwtConfig};
+use axum_jwt_bridge::{generate_jwt, verify_jwt, JwtConfig};
 
 let config = JwtConfig::new("my-secret");
+let token = generate_jwt(1264, &config).unwrap();
 let claims = verify_jwt(&token, &config).unwrap();
 assert_eq!(claims.user_id_u32(), Some(1264));
 ```
@@ -300,92 +361,4 @@ cargo run --example decode -- eyJhbG...
 
 ## License
 
-MIT
-
-## Examples
-
-AuthUser implements FromRequestParts, so it works directly as a handler parameter. Any route that lists it will reject unauthenticated requests automatically.
-
-```rust
-use axum::{routing::get, Extension, Router};
-use axum_jwt_bridge::{AuthUser, JwtConfig};
-
-async fn me(user: AuthUser) -> String {
-    format!("user_id = {}", user.user_id)
-}
-
-#[tokio::main]
-async fn main() {
-    let config = JwtConfig::from_env().unwrap();
-
-    let app = Router::new()
-        .route("/me", get(me))
-        .layer(Extension(config));
-
-    // ...
-}
-```
-
-### Middleware for route groups
-If you want to protect an entire sub-router without touching individual handler signatures — the pattern the user described as "a special function passed as authenticated middleware":
-
-```rust
-use axum::{
-    middleware::{self, Next},
-    extract::Request,
-    response::Response,
-    routing::get,
-    Extension, Router,
-};
-use axum_jwt_bridge::{verify_jwt, AuthError, JwtConfig};
-
-async fn require_auth(
-    Extension(config): Extension<JwtConfig>,
-    mut request: Request,
-    next: Next,
-) -> Result<Response, AuthError> {
-    let token = extract_bearer(&request)?;
-    let claims = verify_jwt(&token, &config)?;
-    // Optionally inject claims for downstream handlers:
-    request.extensions_mut().insert(claims);
-    Ok(next.run(request).await)
-}
-
-fn extract_bearer(req: &Request) -> Result<String, AuthError> {
-    req.headers()
-        .get(http::header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "))
-        .map(str::to_owned)
-        .ok_or(AuthError::MissingHeader)
-}
-
-#[tokio::main]
-async fn main() {
-    let config = JwtConfig::from_env().unwrap();
-
-    let protected = Router::new()
-        .route("/me", get(me))
-        .route("/orders", get(orders))
-        .route_layer(middleware::from_fn(require_auth)); // applied to all routes above
-
-    let app = Router::new()
-        .route("/health", get(health))  // public
-        .merge(protected)               // all protected
-        .layer(Extension(config));
-}
-```
-
-### Multi-issuer migration (Laravel + Rust during migration)
-
-```rust
-use axum_jwt_auth::{AuthUser, JwtConfig, MultiJwtConfig};
-
-let laravel = JwtConfig::laravel_compat(laravel_secret, "App\\Models\\User");
-let rust    = JwtConfig::new(rust_secret);
-let multi   = MultiJwtConfig::new([laravel, rust]);
-
-let app = Router::new()
-    .route("/me", get(me))
-    .layer(Extension(multi)); // AuthUser checks MultiJwtConfig first
-```
+MIT — see [LICENSE](LICENSE).
