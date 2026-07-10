@@ -65,8 +65,8 @@ This crate does **not** load `.env` files.
 | `JWT_SECRET`          | one of   | —                        | HS256 shared secret                        |
 | `JWT_KEY_NAME`        | these    | —                        | EdDSA: SSH-convention key name — `~/.ssh/{name}` / `~/.ssh/{name}.pub` |
 | `JWT_KEY_PATH`        | three    | —                        | EdDSA: exact PEM file path, used as-is     |
-| `BASE_URL`            | no       | `http://localhost:8000`  |                                            |
-| `AUTH_PATH`           | no       | `/api/login`             |                                            |
+| `BASE_URL`            | no       | *(unset — no `iss` claim)* | Combined with `AUTH_PATH` to form `iss` |
+| `AUTH_PATH`           | no       | `/api/login`             | Only used if `BASE_URL` is set             |
 | `JWT_TTL_DAYS`        | no       | `14`                     | Token lifetime in days                     |
 | `USER_MODEL_PATH`     | no       | *(unset)*                | Sets `prv` and enables its validation      |
 | `JWT_VALIDATE_ISSUER` | no       | `false`                  | Set to `true` or `1` to enable             |
@@ -95,7 +95,9 @@ let config = JwtConfig::laravel_compat("my-secret", "App\\Models\\User");
 let config = JwtConfig::new("my-secret")
     .audience(["https://api.example.com"]);
 
-// Custom issuer
+// Custom issuer — sets the `iss` claim to "https://auth.example.com/v2/token".
+// Without .base_url(...), no `iss` claim is written at all (there's no
+// sane placeholder to default to).
 let config = JwtConfig::new("my-secret")
     .base_url("https://auth.example.com")
     .auth_path("/v2/token");
@@ -222,7 +224,9 @@ use axum_jwt_bridge::{AuthUser, JwtConfig, MultiJwtConfig};
 # async fn handler(_: AuthUser) {}
 # async fn example() {
 let laravel = JwtConfig::laravel_compat("laravel-secret", "App\\Models\\User");
-let dotnet  = JwtConfig::new("dotnet-secret").validate_issuer(true);
+let dotnet  = JwtConfig::new("dotnet-secret")
+    .base_url("https://dotnet.example.com")
+    .validate_issuer(true);
 
 let app: Router = Router::new()
     .route("/me", get(handler))

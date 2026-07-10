@@ -60,8 +60,8 @@
 //! | `JWT_SECRET`           | one of   | —                       | HS256 shared secret                       |
 //! | `JWT_KEY_NAME`         | these    | —                       | EdDSA: SSH-convention key name — `~/.ssh/{name}` / `~/.ssh/{name}.pub` |
 //! | `JWT_KEY_PATH`         | three    | —                       | EdDSA: exact PEM file path, used as-is    |
-//! | `BASE_URL`             | no       | `http://localhost:8000` |                                           |
-//! | `AUTH_PATH`            | no       | `/api/login`            |                                           |
+//! | `BASE_URL`             | no       | *(unset — no `iss` claim)* | Combined with `AUTH_PATH` to form `iss` |
+//! | `AUTH_PATH`            | no       | `/api/login`            | Only used if `BASE_URL` is set            |
 //! | `JWT_TTL_DAYS`         | no       | `14`                    | Token lifetime in days                    |
 //! | `USER_MODEL_PATH`      | no       | *(unset — no prv)*      | Sets `prv` claim and **enables** its check|
 //! | `JWT_VALIDATE_ISSUER`  | no       | `false`                 | `true` or `1` to enable                  |

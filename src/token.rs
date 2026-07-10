@@ -56,7 +56,7 @@ pub fn generate_jwt_with<E: Serialize>(
     let ttl_secs = config.ttl_seconds.unwrap_or((config.ttl_days as i64) * 86_400);
 
     let claims = Claims {
-        iss: Some(config.issuer()),
+        iss: config.issuer(),
         iat: now,
         exp: now + ttl_secs,
         nbf: now,
@@ -135,7 +135,9 @@ pub fn verify_jwt_as<E: DeserializeOwned>(
     validation.set_required_spec_claims(&["exp", "sub", "iat"]);
 
     if config.validate_issuer {
-        validation.set_issuer(&[config.issuer()]);
+        if let Some(iss) = config.issuer() {
+            validation.set_issuer(&[iss]);
+        }
     }
 
     if let Some(aud) = &config.audience {
@@ -211,7 +213,16 @@ mod tests {
         let cfg = JwtConfig::new("s")
             .base_url("https://example.com/")
             .auth_path("/api/login");
-        assert_eq!(cfg.issuer(), "https://example.com/api/login");
+        assert_eq!(cfg.issuer(), Some("https://example.com/api/login".to_string()));
+    }
+
+    #[test]
+    fn no_base_url_omits_iss() {
+        let cfg = JwtConfig::new("s");
+        assert_eq!(cfg.issuer(), None);
+        let token = generate_jwt(1, &cfg).unwrap();
+        let claims = verify_jwt(&token, &cfg).unwrap();
+        assert!(claims.iss.is_none());
     }
 
     #[test]

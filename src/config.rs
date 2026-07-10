@@ -148,7 +148,11 @@ impl ProviderStrategy {
 #[derive(Debug, Clone)]
 pub struct JwtConfig {
     pub key: AuthType,
-    pub base_url: String,
+    /// When `Some`, combined with `auth_path` to form the `iss` claim
+    /// (written into generated tokens, and enforced when `validate_issuer`
+    /// is set). `None` means no `iss` claim at all — the default, since
+    /// there's no sane placeholder URL to fall back to.
+    pub base_url: Option<String>,
     pub auth_path: String,
     pub provider: ProviderStrategy,
     pub ttl_days: u64,
@@ -194,8 +198,8 @@ impl JwtConfig {
     fn with_key(key: AuthType) -> Self {
         Self {
             key,
-            base_url: "http://localhost:8000".into(),
-            auth_path: "/api/login".into(),
+            base_url: None,
+            auth_path: "/".into(),
             provider: ProviderStrategy::None,
             ttl_days: 3,
             ttl_seconds: None,
@@ -233,8 +237,8 @@ impl JwtConfig {
     /// | `JWT_SECRET`          | one of   | —                       | HS256 shared secret                      |
     /// | `JWT_KEY_NAME`        | these    | —                       | EdDSA: SSH-convention key name — `~/.ssh/{name}` / `~/.ssh/{name}.pub` |
     /// | `JWT_KEY_PATH`        | three    | —                       | EdDSA: exact PEM file path, used as-is   |
-    /// | `BASE_URL`            | no       | `http://localhost:8000` |                                          |
-    /// | `AUTH_PATH`           | no       | `/api/login`            |                                          |
+    /// | `BASE_URL`            | no       | *(unset — no `iss` claim)* | Combined with `AUTH_PATH` to form `iss` |
+    /// | `AUTH_PATH`           | no       | `/api/login`            | Only used if `BASE_URL` is set           |
     /// | `JWT_TTL_DAYS`        | no       | `3`                    | Token lifetime in days                   |
     /// | `USER_MODEL_PATH`     | no       | *(unset)*               | Sets `prv` and **enables** its validation|
     /// | `JWT_VALIDATE_ISSUER` | no       | `false`                 | `true` or `1` to enable                 |
@@ -258,8 +262,7 @@ impl JwtConfig {
             ));
         };
 
-        let base_url =
-            std::env::var("BASE_URL").unwrap_or_else(|_| "http://localhost:8000".into());
+        let base_url = std::env::var("BASE_URL").ok();
         let auth_path =
             std::env::var("AUTH_PATH").unwrap_or_else(|_| "/api/login".into());
 
@@ -297,15 +300,16 @@ impl JwtConfig {
         })
     }
 
-    /// Full issuer URI: `{base_url}/{auth_path}`.
-    pub fn issuer(&self) -> String {
-        let base = self.base_url.trim_end_matches('/');
+    /// Full issuer URI: `{base_url}/{auth_path}`, if `base_url` is set.
+    /// `None` means no `iss` claim is written or validated.
+    pub fn issuer(&self) -> Option<String> {
+        let base = self.base_url.as_deref()?.trim_end_matches('/');
         let path = self.auth_path.trim_start_matches('/');
-        format!("{base}/{path}")
+        Some(format!("{base}/{path}"))
     }
 
     pub fn base_url(&mut self, v: impl Into<String>) -> Self {
-        self.base_url = v.into();
+        self.base_url = Some(v.into());
         self.to_owned()
     }
     pub fn auth_path(&mut self, v: impl Into<String>) -> Self {
@@ -357,7 +361,9 @@ impl JwtConfig {
 /// # async fn handler(_: AuthUser) {}
 /// # async fn example() {
 /// let laravel = JwtConfig::laravel_compat("laravel-secret", "App\\Models\\User");
-/// let dotnet  = JwtConfig::new("dotnet-secret").validate_issuer(true);
+/// let dotnet  = JwtConfig::new("dotnet-secret")
+///     .base_url("https://dotnet.example.com")
+///     .validate_issuer(true);
 ///
 /// let app: Router = Router::new()
 ///     .route("/me", get(handler))
